@@ -1,0 +1,21 @@
+schemaVersion: 1
+prompt:
+  langfuseName: agents/british-gas/payg/voice/assistant
+  langfuseVersion: 5
+  langfuseLabel: production
+identity:
+  supplierVendor: british-gas
+  domain: payg
+  channel: voice
+  component: assistant
+runtime:
+  platform: amazon-connect
+  model: amazon_nova_2_sonic
+  connectPromptType: SELF_SERVICE_PRE_PROCESSING
+artefacts:
+  source: prompt.json
+  review: prompt.md
+  deployable: prompt.yaml
+release:
+  status: production-synchronised
+  semanticVersion: null
