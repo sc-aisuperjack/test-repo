@@ -3,7 +3,7 @@ name: Sync Versioned Langfuse Production Prompt
 on:
   repository_dispatch:
     types:
-      - langfuse-prompt-update
+      - langfuse-production-prompt-update
   workflow_dispatch:
 
 permissions:

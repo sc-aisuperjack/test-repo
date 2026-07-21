@@ -3,7 +3,7 @@ name: Sync Versioned Langfuse Latest Prompt
 on:
   repository_dispatch:
     types:
-      - langfuse-prompt-update
+      - langfuse-latest-prompt-update
   workflow_dispatch:
 
 permissions:
