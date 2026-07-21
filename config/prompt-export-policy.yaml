@@ -1,0 +1,17 @@
+schemaVersion: 1
+langfuse:
+  productionLabel: production
+export:
+  allowedRoot: agents
+  outputRoot: prompts
+  requireLowercaseNames: true
+ignoredRoots:
+  - shared
+  - domains
+  - channels
+  - supplier-vendors
+artefacts:
+  - prompt.json
+  - prompt.md
+  - prompt.yaml
+  - manifest.yaml

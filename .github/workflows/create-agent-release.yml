@@ -1,0 +1,76 @@
+name: Create Agent Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      prompt_name:
+        description: "agents/british-gas/payg/voice/assistant"
+        required: true
+        type: string
+      langfuse_version:
+        description: "Stored Langfuse version number"
+        required: true
+        type: string
+      semantic_version:
+        description: "MAJOR.MINOR.PATCH, e.g. 0.1.0"
+        required: true
+        type: string
+      release_notes:
+        description: "Optional release notes"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: validate
+        name: Validate release
+        shell: bash
+        env:
+          PROMPT_NAME: ${{ inputs.prompt_name }}
+          LANGFUSE_VERSION: ${{ inputs.langfuse_version }}
+          SEMANTIC_VERSION: ${{ inputs.semantic_version }}
+        run: |
+          if [[ "${PROMPT_NAME}" != agents/* ]] || [[ "${PROMPT_NAME}" =~ [A-Z] ]] || [[ "${PROMPT_NAME}" == *".."* ]]; then
+            echo "Only lowercase agents/... prompts may be released."
+            exit 1
+          fi
+          [[ "${LANGFUSE_VERSION}" =~ ^[0-9]+$ ]] || { echo "Langfuse version must be numeric."; exit 1; }
+          [[ "${SEMANTIC_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Use MAJOR.MINOR.PATCH."; exit 1; }
+
+          VERSION_DIR="prompts/${PROMPT_NAME}/version-${LANGFUSE_VERSION}"
+          for FILE in prompt.json prompt.md prompt.yaml manifest.yaml; do
+            test -s "${VERSION_DIR}/${FILE}" || { echo "Missing ${VERSION_DIR}/${FILE}"; exit 1; }
+          done
+
+          COMPONENT="${PROMPT_NAME#agents/}"
+          echo "version_dir=${VERSION_DIR}" >> "${GITHUB_OUTPUT}"
+          echo "tag=${COMPONENT}/v${SEMANTIC_VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "title=${COMPONENT} v${SEMANTIC_VERSION}" >> "${GITHUB_OUTPUT}"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION_DIR: ${{ steps.validate.outputs.version_dir }}
+          TAG: ${{ steps.validate.outputs.tag }}
+          TITLE: ${{ steps.validate.outputs.title }}
+          RELEASE_NOTES: ${{ inputs.release_notes }}
+        shell: bash
+        run: |
+          NOTES="${RELEASE_NOTES:-Approved production agent prompt release.}"
+          gh release create "${TAG}" \
+            "${VERSION_DIR}/prompt.json" \
+            "${VERSION_DIR}/prompt.md" \
+            "${VERSION_DIR}/prompt.yaml" \
+            "${VERSION_DIR}/manifest.yaml" \
+            --target "${GITHUB_SHA}" \
+            --title "${TITLE}" \
+            --notes "${NOTES}"

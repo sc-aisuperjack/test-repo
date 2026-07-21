@@ -1,0 +1,119 @@
+name: Sync Langfuse Production Agents
+
+on:
+  repository_dispatch:
+    types: [langfuse-production-prompt-update]
+  workflow_dispatch:
+    inputs:
+      prompt_name:
+        description: "Lowercase Langfuse prompt name, e.g. agents/british-gas/payg/voice/assistant"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: langfuse-production-${{ github.event.client_payload.prompt.name || inputs.prompt_name }}
+  cancel-in-progress: false
+
+jobs:
+  classify:
+    runs-on: ubuntu-latest
+    outputs:
+      prompt_name: ${{ steps.classify.outputs.prompt_name }}
+      should_export: ${{ steps.classify.outputs.should_export }}
+    steps:
+      - id: classify
+        name: Classify Langfuse prompt
+        shell: bash
+        env:
+          DISPATCH_NAME: ${{ github.event.client_payload.prompt.name }}
+          MANUAL_NAME: ${{ inputs.prompt_name }}
+        run: |
+          PROMPT_NAME="${DISPATCH_NAME:-${MANUAL_NAME:-}}"
+
+          if [ -z "${PROMPT_NAME}" ]; then
+            echo "No prompt name was supplied."
+            exit 1
+          fi
+
+          if [[ "${PROMPT_NAME}" == /* ]] || [[ "${PROMPT_NAME}" == *".."* ]]; then
+            echo "Unsafe prompt name: ${PROMPT_NAME}"
+            exit 1
+          fi
+
+          if [[ "${PROMPT_NAME}" =~ [A-Z] ]]; then
+            echo "Prompt names must be lowercase: ${PROMPT_NAME}"
+            exit 1
+          fi
+
+          echo "prompt_name=${PROMPT_NAME}" >> "${GITHUB_OUTPUT}"
+
+          if [[ "${PROMPT_NAME}" == agents/* ]]; then
+            echo "should_export=true" >> "${GITHUB_OUTPUT}"
+            echo "Complete agent prompt detected: ${PROMPT_NAME}"
+          else
+            echo "should_export=false" >> "${GITHUB_OUTPUT}"
+            echo "Non-agent micro prompt detected. No production artefact will be created: ${PROMPT_NAME}"
+          fi
+
+  export:
+    needs: classify
+    if: needs.classify.outputs.should_export == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install exporter dependencies
+        run: python -m pip install --upgrade -r requirements-prompt-export.txt
+
+      - name: Run export policy tests
+        run: python -m pytest tests/prompt_export -q
+
+      - name: Fetch production-labelled complete agent
+        env:
+          LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
+          LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
+          LANGFUSE_BASE_URL: ${{ secrets.LANGFUSE_BASE_URL }}
+          PROMPT_NAME: ${{ needs.classify.outputs.prompt_name }}
+          PROMPT_LABEL: production
+        run: python scripts/export_langfuse_agent.py
+
+      - name: Validate generated artefacts
+        env:
+          PROMPT_NAME: ${{ needs.classify.outputs.prompt_name }}
+        run: python scripts/validate_exported_agent.py
+
+      - name: Commit immutable production artefacts
+        shell: bash
+        env:
+          PROMPT_NAME: ${{ needs.classify.outputs.prompt_name }}
+          TARGET_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          git config user.name "langfuse-prompt-bot"
+          git config user.email "langfuse-prompt-bot@users.noreply.github.com"
+
+          OUTPUT_ROOT="prompts/${PROMPT_NAME}"
+          git add -A -- "${OUTPUT_ROOT}"
+
+          if git diff --cached --quiet; then
+            echo "No new production artefacts to commit."
+            exit 0
+          fi
+
+          VERSION="$(
+            find "${OUTPUT_ROOT}" -maxdepth 1 -type d -name 'version-*' -printf '%f\n' \
+              | sed 's/^version-//' | sort -n | tail -1
+          )"
+
+          git commit -m "Sync ${PROMPT_NAME} production version ${VERSION}"
+          git pull --rebase origin "${TARGET_BRANCH}"
+          git push origin "HEAD:${TARGET_BRANCH}"

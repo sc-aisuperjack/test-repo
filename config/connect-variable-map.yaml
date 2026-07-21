@@ -1,0 +1,13 @@
+schemaVersion: 1
+variables:
+  locale: "$.locale"
+  conversation_history: "$.conversationHistory"
+  conversationHistory: "$.conversationHistory"
+  tool_configuration_list: "$.toolConfigurationList"
+  toolConfigurationList: "$.toolConfigurationList"
+  account_number: "$.Custom.accountNumber"
+  accountNumber: "$.Custom.accountNumber"
+  contact_id: "$.Custom.contactId"
+  contactId: "$.Custom.contactId"
+  customer_name: "$.Custom.customerName"
+  customerName: "$.Custom.customerName"
