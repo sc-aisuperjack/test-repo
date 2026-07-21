@@ -2,7 +2,8 @@
   "name": "agents/bg-marketing-chat-agent-latest",
   "version": 5,
   "labels": [
-    "latest"
+    "latest",
+    "production"
   ],
   "type": null,
   "config": {},
