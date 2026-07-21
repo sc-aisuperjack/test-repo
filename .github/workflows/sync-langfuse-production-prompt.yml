@@ -1,10 +1,9 @@
-name: Sync Langfuse Production Prompt
+name: Sync Versioned Langfuse Production Prompt
 
 on:
   repository_dispatch:
     types:
       - langfuse-prompt-update
-
   workflow_dispatch:
 
 permissions:
@@ -17,19 +16,18 @@ concurrency:
 env:
   PROMPT_NAME: "agents/bg-marketing-chat-agent-production"
   PROMPT_LABEL: "production"
-  PROMPT_FILE: "prompts/agents/bg-marketing-chat-agent-production.json"
+  PROMPT_ROOT: "prompts"
+  AGENT_DIR: "prompts/agents/bg-marketing-chat-agent-production"
+  LEGACY_PROMPT_FILE: "prompts/agents/bg-marketing-chat-agent-production.json"
 
 jobs:
   sync-production-prompt:
-    name: Fetch and commit production prompt
+    name: Fetch and commit versioned production prompt
     runs-on: ubuntu-latest
 
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      (
-        github.event.client_payload.prompt.name == 'agents/bg-marketing-chat-agent-production' &&
-        contains(github.event.client_payload.prompt.labels, 'production')
-      )
+      github.event.client_payload.prompt.name == 'agents/bg-marketing-chat-agent-production'
 
     steps:
       - name: Check out repository
@@ -45,7 +43,7 @@ jobs:
       - name: Install Langfuse SDK
         run: python -m pip install --upgrade "langfuse>=3,<4"
 
-      - name: Fetch production prompt from Langfuse
+      - name: Fetch and export production prompt
         env:
           LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
           LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
@@ -54,99 +52,202 @@ jobs:
           python - <<'PY'
           import json
           import os
+          import re
           from pathlib import Path
+          from typing import Any
 
           from langfuse import get_client
 
           prompt_name = os.environ["PROMPT_NAME"]
           prompt_label = os.environ["PROMPT_LABEL"]
-          output_file = Path(os.environ["PROMPT_FILE"])
+          agent_dir = Path(os.environ["AGENT_DIR"])
+          legacy_prompt_file = Path(os.environ["LEGACY_PROMPT_FILE"])
 
           langfuse = get_client()
-
           prompt = langfuse.get_prompt(
               prompt_name,
               label=prompt_label,
           )
 
+          version = getattr(prompt, "version", None)
+          version_text = str(version)
+
+          if not re.fullmatch(r"\d+", version_text):
+              raise SystemExit(
+                  f"Unexpected Langfuse prompt version: {version!r}"
+              )
+
+          labels = getattr(prompt, "labels", []) or []
+          if prompt_label not in labels:
+              raise SystemExit(
+                  f"Fetched prompt does not carry the "
+                  f"'{prompt_label}' label."
+              )
+
           prompt_content = prompt.prompt
+          if prompt_content in (None, "", []):
+              raise SystemExit("Prompt content is empty.")
+
+          prompt_slug = Path(prompt_name).name
+          version_dir = agent_dir / f"version-{version_text}"
+          json_file = (
+              version_dir
+              / f"{prompt_slug}-v{version_text}.json"
+          )
+          markdown_file = version_dir / "prompt.md"
+
+          def normalise_text(value: str) -> str:
+              return value.replace("\r\n", "\n").replace("\r", "\n")
+
+          def render_content(value: Any) -> str:
+              if isinstance(value, str):
+                  return normalise_text(value).strip()
+
+              if isinstance(value, list):
+                  blocks = [render_content(item) for item in value]
+                  return "\n\n".join(
+                      block for block in blocks if block.strip()
+                  ).strip()
+
+              if isinstance(value, dict):
+                  if isinstance(value.get("text"), str):
+                      return normalise_text(value["text"]).strip()
+
+                  if "content" in value:
+                      return render_content(value["content"])
+
+                  return (
+                      "```json\n"
+                      + json.dumps(
+                          value,
+                          indent=2,
+                          ensure_ascii=False,
+                      )
+                      + "\n```"
+                  )
+
+              return str(value).strip()
+
+          def render_markdown(value: Any) -> str:
+              # Langfuse text prompt: preserve the prompt as Markdown.
+              if isinstance(value, str):
+                  return normalise_text(value).rstrip() + "\n"
+
+              # Langfuse chat prompt: render each role as a Markdown section.
+              if isinstance(value, list):
+                  sections: list[str] = []
+
+                  for index, message in enumerate(value, start=1):
+                      if not isinstance(message, dict):
+                          raise SystemExit(
+                              f"Chat message {index} is not an object."
+                          )
+
+                      role = str(
+                          message.get("role", "message")
+                      ).strip()
+                      heading = role.replace("_", " ").title()
+                      body = render_content(
+                          message.get("content", "")
+                      )
+
+                      if body:
+                          sections.append(
+                              f"## {heading}\n\n{body}"
+                          )
+
+                  if not sections:
+                      raise SystemExit(
+                          "Chat prompt contained no renderable messages."
+                      )
+
+                  return "\n\n".join(sections).rstrip() + "\n"
+
+              return render_content(value).rstrip() + "\n"
 
           output = {
               "name": prompt_name,
-              "version": getattr(prompt, "version", None),
-              "labels": getattr(prompt, "labels", []),
+              "version": version,
+              "labels": labels,
               "type": getattr(prompt, "type", None),
               "config": getattr(prompt, "config", {}) or {},
               "prompt": prompt_content,
           }
 
-          output_file.parent.mkdir(parents=True, exist_ok=True)
-          output_file.write_text(
-              json.dumps(output, indent=2, ensure_ascii=False) + "\n",
+          version_dir.mkdir(parents=True, exist_ok=True)
+
+          json_file.write_text(
+              json.dumps(
+                  output,
+                  indent=2,
+                  ensure_ascii=False,
+              )
+              + "\n",
               encoding="utf-8",
           )
 
-          print(
-              f"Fetched Langfuse prompt '{prompt_name}' "
-              f"with label '{prompt_label}', version {output['version']}."
+          markdown_file.write_text(
+              render_markdown(prompt_content),
+              encoding="utf-8",
           )
-          print(f"Saved to {output_file}.")
+
+          # Remove the old flat export now that versioned storage is used.
+          if legacy_prompt_file.exists():
+              legacy_prompt_file.unlink()
+
+          if not json_file.is_file():
+              raise SystemExit(f"JSON file was not created: {json_file}")
+
+          if not markdown_file.is_file():
+              raise SystemExit(
+                  f"Markdown file was not created: {markdown_file}"
+              )
+
+          if not markdown_file.read_text(
+              encoding="utf-8"
+          ).strip():
+              raise SystemExit("Markdown file is empty.")
+
+          print(
+              f"Fetched '{prompt_name}' production version "
+              f"{version_text}."
+          )
+          print(f"Created JSON: {json_file}")
+          print(f"Created Markdown: {markdown_file}")
           PY
 
-      - name: Validate exported prompt
+      - name: Show generated files
         run: |
-          python - <<'PY'
-          import json
-          import os
-          from pathlib import Path
+          find "${AGENT_DIR}" -maxdepth 3 -type f -print | sort
 
-          prompt_name = os.environ["PROMPT_NAME"]
-          prompt_label = os.environ["PROMPT_LABEL"]
-          prompt_file = Path(os.environ["PROMPT_FILE"])
-
-          if not prompt_file.is_file():
-              raise SystemExit(f"Prompt file was not created: {prompt_file}")
-
-          data = json.loads(prompt_file.read_text(encoding="utf-8"))
-
-          if data.get("name") != prompt_name:
-              raise SystemExit(
-                  f"Unexpected prompt name: {data.get('name')!r}"
-              )
-
-          labels = data.get("labels") or []
-          if prompt_label not in labels:
-              raise SystemExit(
-                  f"Fetched prompt does not carry the '{prompt_label}' label."
-              )
-
-          content = data.get("prompt")
-          if content is None or content == "" or content == []:
-              raise SystemExit("Prompt content is empty.")
-
-          if data.get("version") is None:
-              raise SystemExit("Prompt version is missing.")
-
-          print(
-              f"Validation passed for '{prompt_name}', "
-              f"version {data['version']}."
-          )
-          PY
-
-      - name: Commit updated prompt
+      - name: Commit versioned prompt files
         env:
           TARGET_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
-          if [ -z "$(git status --porcelain -- "${PROMPT_FILE}")" ]; then
-            echo "The production prompt has not changed."
+          git config user.name "langfuse-prompt-bot"
+          git config user.email \
+            "langfuse-prompt-bot@users.noreply.github.com"
+
+          # Stage the whole prompts tree so Git sees new folders,
+          # new files, updates, and deletion of the old flat JSON.
+          git add -A -- "${PROMPT_ROOT}"
+
+          # Check staged changes after git add.
+          if git diff --cached --quiet; then
+            echo "This production version is already stored and unchanged."
             exit 0
           fi
 
-          git config user.name "langfuse-prompt-bot"
-          git config user.email "langfuse-prompt-bot@users.noreply.github.com"
+          PROMPT_VERSION="$(
+            find "${AGENT_DIR}" -maxdepth 1 -type d \
+              -name 'version-*' -printf '%f\n' \
+              | sed 's/^version-//' \
+              | sort -n \
+              | tail -1
+          )"
 
-          git add "${PROMPT_FILE}"
-          git commit -m "Sync Langfuse production prompt"
+          git commit -m \
+            "Sync ${PROMPT_NAME} production prompt v${PROMPT_VERSION}"
 
           git pull --rebase origin "${TARGET_BRANCH}"
           git push origin "HEAD:${TARGET_BRANCH}"
